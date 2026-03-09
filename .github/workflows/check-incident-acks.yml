@@ -16,7 +16,7 @@ jobs:
         run: |
           echo "⏱️  Waiting 3 minutes before checking acknowledgment count..."
           echo "Started at: $(date)"
-          sleep 180
+          sleep 10
           echo "Wait complete at: $(date)"
       
       - name: Check acknowledgment count and add responders if needed
@@ -92,10 +92,27 @@ jobs:
             LAYER_2_TARGETS=$(echo $EP_DATA | jq -c '.escalation_policy.escalation_rules[1].targets')
             echo "✓ Layer 2 targets found: $(echo $LAYER_2_TARGETS | jq 'length') target(s)"
             
+            # DEBUG: Print the raw targets
+            echo "🔍 DEBUG - Layer 2 targets:"
+            echo $LAYER_2_TARGETS | jq '.'
+            
             # Build responder request targets array using jq map
             RESPONDER_TARGETS=$(echo $LAYER_2_TARGETS | jq -c '[.[] | {responder_request_target: {type: .type, id: .id}}]')
             
             echo "✓ Built responder targets payload"
+            
+            # DEBUG: Print the payload we're sending
+            echo "🔍 DEBUG - Responder targets payload:"
+            echo $RESPONDER_TARGETS | jq '.'
+            
+            # Build the request payload
+            REQUEST_PAYLOAD=$(jq -n \
+              --arg msg "Adding Layer 2 responders - insufficient L1 acknowledgments (${ACK_COUNT}/2)" \
+              --argjson targets "$RESPONDER_TARGETS" \
+              '{message: $msg, responder_request_targets: $targets}')
+            
+            echo "🔍 DEBUG - Full request payload:"
+            echo $REQUEST_PAYLOAD | jq '.'
             
             # Add responders to incident
             RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
@@ -104,10 +121,7 @@ jobs:
               -H "Content-Type: application/json" \
               -H "Accept: application/vnd.pagerduty+json;version=2" \
               -H "From: ${PD_FROM_EMAIL}" \
-              -d "{
-                \"message\": \"Adding Layer 2 responders - insufficient L1 acknowledgments (${ACK_COUNT}/2)\",
-                \"responder_request_targets\": ${RESPONDER_TARGETS}
-              }")
+              -d "$REQUEST_PAYLOAD")
             
             HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
             RESPONSE_BODY=$(echo "$RESPONSE" | head -n-1)
