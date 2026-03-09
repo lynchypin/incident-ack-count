@@ -1,0 +1,146 @@
+name: Check PagerDuty Incident Acknowledgments
+
+on:
+  repository_dispatch:
+    types: [check-incident-acks]
+
+jobs:
+  check-and-add-responders:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Check acknowledgment count and add responders if needed
+        env:
+          PD_API_KEY: ${{ secrets.PD_API_KEY }}
+          PD_FROM_EMAIL: ${{ secrets.PD_FROM_EMAIL }}
+          INCIDENT_ID: ${{ github.event.client_payload.incident_id }}
+          INCIDENT_NUMBER: ${{ github.event.client_payload.incident_number }}
+          EP_ID: ${{ github.event.client_payload.escalation_policy_id }}
+          SERVICE_ID: ${{ github.event.client_payload.service_id }}
+        run: |
+          echo "================================================"
+          echo "PagerDuty Incident Acknowledgment Checker"
+          echo "================================================"
+          echo "Incident ID: ${INCIDENT_ID}"
+          echo "Incident Number: ${INCIDENT_NUMBER}"
+          echo "Escalation Policy ID: ${EP_ID}"
+          echo "Service ID: ${SERVICE_ID}"
+          echo "================================================"
+          
+          # Get incident details including acknowledgments
+          echo "Fetching incident details..."
+          INCIDENT_DATA=$(curl -s -X GET \
+            "https://api.pagerduty.com/incidents/${INCIDENT_ID}" \
+            -H "Authorization: Token token=${PD_API_KEY}" \
+            -H "Accept: application/vnd.pagerduty+json;version=2")
+          
+          # Check if API call was successful
+          if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to fetch incident data from PagerDuty API"
+            exit 1
+          fi
+          
+          # Count acknowledgments
+          ACK_COUNT=$(echo $INCIDENT_DATA | jq '.incident.acknowledgements | length')
+          
+          echo "✓ Incident ${INCIDENT_NUMBER} has ${ACK_COUNT} acknowledgment(s)"
+          
+          # Get incident status
+          INCIDENT_STATUS=$(echo $INCIDENT_DATA | jq -r '.incident.status')
+          echo "✓ Incident status: ${INCIDENT_STATUS}"
+          
+          # If less than 2 acks and incident is still triggered or acknowledged, add Layer 2 responders
+          if [ $ACK_COUNT -lt 2 ] && [ "$INCIDENT_STATUS" != "resolved" ]; then
+            echo ""
+            echo "⚠️  Less than 2 acknowledgments detected!"
+            echo "Adding Layer 2 responders from escalation policy..."
+            
+            # Get EP details to find Layer 2 information
+            EP_DATA=$(curl -s -X GET \
+              "https://api.pagerduty.com/escalation_policies/${EP_ID}" \
+              -H "Authorization: Token token=${PD_API_KEY}" \
+              -H "Accept: application/vnd.pagerduty+json;version=2")
+            
+            # Get EP name for logging
+            EP_NAME=$(echo $EP_DATA | jq -r '.escalation_policy.name')
+            echo "✓ Escalation Policy: ${EP_NAME}"
+            
+            # Count escalation levels
+            LEVEL_COUNT=$(echo $EP_DATA | jq '.escalation_policy.escalation_rules | length')
+            echo "✓ Escalation Policy has ${LEVEL_COUNT} level(s)"
+            
+            # Check if Layer 2 exists (index 1)
+            if [ $LEVEL_COUNT -lt 2 ]; then
+              echo "⚠️  WARNING: Escalation Policy only has 1 level. No Layer 2 to add."
+              exit 0
+            fi
+            
+            # Get Layer 2 targets (schedules or users)
+            LAYER_2_TARGETS=$(echo $EP_DATA | jq -c '.escalation_policy.escalation_rules[1].targets')
+            echo "✓ Layer 2 targets found: $(echo $LAYER_2_TARGETS | jq 'length') target(s)"
+            
+            # Build responder request targets array
+            RESPONDER_TARGETS="[]"
+            
+            # Add each target from Layer 2
+            for target in $(echo $LAYER_2_TARGETS | jq -c '.[]'); do
+              TARGET_TYPE=$(echo $target | jq -r '.type')
+              TARGET_ID=$(echo $target | jq -r '.id')
+              
+              if [ "$TARGET_TYPE" = "user_reference" ]; then
+                RESPONDER_TARGETS=$(echo $RESPONDER_TARGETS | jq --arg id "$TARGET_ID" '. += [{"responder_request_target": {"type": "user_reference", "id": $id}}]')
+              elif [ "$TARGET_TYPE" = "schedule_reference" ]; then
+                RESPONDER_TARGETS=$(echo $RESPONDER_TARGETS | jq --arg id "$TARGET_ID" '. += [{"responder_request_target": {"type": "schedule_reference", "id": $id}}]')
+              fi
+            done
+            
+            echo "✓ Built responder targets payload"
+            
+            # Add responders to incident
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              "https://api.pagerduty.com/incidents/${INCIDENT_ID}/responder_requests" \
+              -H "Authorization: Token token=${PD_API_KEY}" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/vnd.pagerduty+json;version=2" \
+              -H "From: ${PD_FROM_EMAIL}" \
+              -d "{
+                \"message\": \"Adding Layer 2 responders - insufficient L1 acknowledgments (${ACK_COUNT}/2)\",
+                \"responder_request_targets\": ${RESPONDER_TARGETS}
+              }")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            RESPONSE_BODY=$(echo "$RESPONSE" | head -n-1)
+            
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo ""
+              echo "✅ SUCCESS: Layer 2 responders added successfully!"
+              echo "HTTP Status: ${HTTP_CODE}"
+              
+              # Count how many responders were added
+              RESPONDERS_ADDED=$(echo $RESPONSE_BODY | jq '.responder_request.responder_request_targets | length')
+              echo "✓ ${RESPONDERS_ADDED} responder(s) added to incident #${INCIDENT_NUMBER}"
+            else
+              echo ""
+              echo "❌ ERROR: Failed to add responders"
+              echo "HTTP Status: ${HTTP_CODE}"
+              echo "Response: ${RESPONSE_BODY}"
+              exit 1
+            fi
+            
+          else
+            if [ "$INCIDENT_STATUS" = "resolved" ]; then
+              echo ""
+              echo "✓ Incident is already resolved. No action needed."
+            else
+              echo ""
+              echo "✅ Sufficient acknowledgments (${ACK_COUNT}/2). No action needed."
+            fi
+          fi
+          
+          echo ""
+          echo "================================================"
+          echo "Workflow completed successfully"
+          echo "================================================"
