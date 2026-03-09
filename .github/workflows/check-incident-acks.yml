@@ -25,16 +25,12 @@ jobs:
           PD_FROM_EMAIL: ${{ secrets.PD_FROM_EMAIL }}
           INCIDENT_ID: ${{ github.event.client_payload.incident_id }}
           INCIDENT_NUMBER: ${{ github.event.client_payload.incident_number }}
-          EP_ID: ${{ github.event.client_payload.escalation_policy_id }}
-          SERVICE_ID: ${{ github.event.client_payload.service_id }}
         run: |
           echo "================================================"
           echo "PagerDuty Incident Acknowledgment Checker"
           echo "================================================"
           echo "Incident ID: ${INCIDENT_ID}"
           echo "Incident Number: ${INCIDENT_NUMBER}"
-          echo "Escalation Policy ID: ${EP_ID}"
-          echo "Service ID: ${SERVICE_ID}"
           echo "================================================"
           
           # Get incident details including acknowledgments
@@ -49,6 +45,13 @@ jobs:
             echo "ERROR: Failed to fetch incident data from PagerDuty API"
             exit 1
           fi
+          
+          # Extract escalation policy ID and service ID from incident data
+          EP_ID=$(echo $INCIDENT_DATA | jq -r '.incident.escalation_policy.id')
+          SERVICE_ID=$(echo $INCIDENT_DATA | jq -r '.incident.service.id')
+          
+          echo "✓ Escalation Policy ID: ${EP_ID}"
+          echo "✓ Service ID: ${SERVICE_ID}"
           
           # Count acknowledgments
           ACK_COUNT=$(echo $INCIDENT_DATA | jq '.incident.acknowledgements | length')
