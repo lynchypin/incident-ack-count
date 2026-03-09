@@ -19,163 +19,152 @@ jobs:
           sleep 10
           echo "Wait complete at: $(date)"
       
-      - name: Check acknowledgment count and add responders if needed
+      - name: Check acknowledgment count and add responders
         env:
           PD_API_KEY: ${{ secrets.PD_API_KEY }}
           PD_FROM_EMAIL: ${{ secrets.PD_FROM_EMAIL }}
           INCIDENT_ID: ${{ github.event.client_payload.incident_id }}
           INCIDENT_NUMBER: ${{ github.event.client_payload.incident_number }}
         run: |
-          echo "================================================"
-          echo "PagerDuty Incident Acknowledgment Checker"
-          echo "================================================"
-          echo "Incident ID: ${INCIDENT_ID}"
-          echo "Incident Number: ${INCIDENT_NUMBER}"
-          echo "================================================"
+          python3 << 'EOF'
+          import os
+          import json
+          import requests
+          import sys
           
-          # Get incident details including acknowledgments
-          echo "Fetching incident details..."
-          INCIDENT_DATA=$(curl -s -X GET \
-            "https://api.pagerduty.com/incidents/${INCIDENT_ID}" \
-            -H "Authorization: Token token=${PD_API_KEY}" \
-            -H "Accept: application/vnd.pagerduty+json;version=2")
+          # Get environment variables
+          PD_API_KEY = os.environ['PD_API_KEY']
+          PD_FROM_EMAIL = os.environ['PD_FROM_EMAIL']
+          INCIDENT_ID = os.environ['INCIDENT_ID']
+          INCIDENT_NUMBER = os.environ['INCIDENT_NUMBER']
           
-          # Check if API call was successful
-          if [ $? -ne 0 ]; then
-            echo "ERROR: Failed to fetch incident data from PagerDuty API"
-            exit 1
-          fi
+          BASE_URL = "https://api.pagerduty.com"
+          HEADERS = {
+              "Authorization": f"Token token={PD_API_KEY}",
+              "Accept": "application/vnd.pagerduty+json;version=2",
+              "Content-Type": "application/json",
+              "From": PD_FROM_EMAIL
+          }
           
-          # Extract escalation policy ID and service ID from incident data
-          EP_ID=$(echo $INCIDENT_DATA | jq -r '.incident.escalation_policy.id')
-          SERVICE_ID=$(echo $INCIDENT_DATA | jq -r '.incident.service.id')
+          print("=" * 50)
+          print("PagerDuty Incident Acknowledgment Checker")
+          print("=" * 50)
+          print(f"Incident ID: {INCIDENT_ID}")
+          print(f"Incident Number: {INCIDENT_NUMBER}")
+          print("=" * 50)
           
-          echo "✓ Escalation Policy ID: ${EP_ID}"
-          echo "✓ Service ID: ${SERVICE_ID}"
+          # Get incident details
+          print("Fetching incident details...")
+          incident_response = requests.get(f"{BASE_URL}/incidents/{INCIDENT_ID}", headers=HEADERS)
+          incident_data = incident_response.json()['incident']
           
-          # Count acknowledgments
-          ACK_COUNT=$(echo $INCIDENT_DATA | jq '.incident.acknowledgements | length')
+          ep_id = incident_data['escalation_policy']['id']
+          ack_count = len(incident_data.get('acknowledgements', []))
+          status = incident_data['status']
           
-          echo "✓ Incident ${INCIDENT_NUMBER} has ${ACK_COUNT} acknowledgment(s)"
+          print(f"✓ Escalation Policy ID: {ep_id}")
+          print(f"✓ Incident {INCIDENT_NUMBER} has {ack_count} acknowledgment(s)")
+          print(f"✓ Incident status: {status}")
           
-          # Get incident status
-          INCIDENT_STATUS=$(echo $INCIDENT_DATA | jq -r '.incident.status')
-          echo "✓ Incident status: ${INCIDENT_STATUS}"
-          
-          # If less than 2 acks and incident is still triggered or acknowledged, add Layer 2 responders
-          if [ $ACK_COUNT -lt 2 ] && [ "$INCIDENT_STATUS" != "resolved" ]; then
-            echo ""
-            echo "⚠️  Less than 2 acknowledgments detected!"
-            echo "Adding Layer 2 responders from escalation policy..."
-            
-            # Get EP details to find Layer 2 information
-            EP_DATA=$(curl -s -X GET \
-              "https://api.pagerduty.com/escalation_policies/${EP_ID}" \
-              -H "Authorization: Token token=${PD_API_KEY}" \
-              -H "Accept: application/vnd.pagerduty+json;version=2")
-            
-            # Get EP name for logging
-            EP_NAME=$(echo $EP_DATA | jq -r '.escalation_policy.name')
-            echo "✓ Escalation Policy: ${EP_NAME}"
-            
-            # Count escalation levels
-            LEVEL_COUNT=$(echo $EP_DATA | jq '.escalation_policy.escalation_rules | length')
-            echo "✓ Escalation Policy has ${LEVEL_COUNT} level(s)"
-            
-            # Check if Layer 2 exists (index 1)
-            if [ $LEVEL_COUNT -lt 2 ]; then
-              echo "⚠️  WARNING: Escalation Policy only has 1 level. No Layer 2 to add."
-              exit 0
-            fi
-            
-            # Get Layer 2 targets (schedules or users)
-            LAYER_2_TARGETS=$(echo $EP_DATA | jq -c '.escalation_policy.escalation_rules[1].targets')
-            echo "✓ Layer 2 targets found: $(echo $LAYER_2_TARGETS | jq 'length') target(s)"
-            
-            # DEBUG: Print the raw targets
-            echo "🔍 DEBUG - Layer 2 targets:"
-            echo $LAYER_2_TARGETS | jq '.'
-            
-            # Get existing assignees (just the IDs) and write to temp file
-            echo $INCIDENT_DATA | jq '[.incident.assignments[].assignee | {assignee: {id: .id, type: .type}}]' > /tmp/assignments.json
-            
-            echo "🔍 DEBUG - Existing assignments (cleaned):"
-            cat /tmp/assignments.json | jq '.'
-            
-            # Add Layer 2 users to assignments
-            for target in $(echo $LAYER_2_TARGETS | jq -c '.[]'); do
-              TARGET_TYPE=$(echo $target | jq -r '.type')
-              TARGET_ID=$(echo $target | jq -r '.id')
+          # Check if we need to add Layer 2
+          if ack_count < 2 and status != "resolved":
+              print("")
+              print("⚠️  Less than 2 acknowledgments detected!")
+              print("Adding Layer 2 responders from escalation policy...")
               
-              if [ "$TARGET_TYPE" = "user_reference" ]; then
-                # Add user directly
-                echo "✓ Adding user ${TARGET_ID}..."
-                cat /tmp/assignments.json | jq --arg id "$TARGET_ID" '. += [{assignee: {id: $id, type: "user_reference"}}]' > /tmp/assignments_new.json
-                mv /tmp/assignments_new.json /tmp/assignments.json
-              elif [ "$TARGET_TYPE" = "schedule_reference" ]; then
-                # For schedules, we need to get the on-call user
-                echo "✓ Fetching on-call user from schedule ${TARGET_ID}..."
-                ONCALL_DATA=$(curl -s -X GET \
-                  "https://api.pagerduty.com/schedules/${TARGET_ID}/users" \
-                  -H "Authorization: Token token=${PD_API_KEY}" \
-                  -H "Accept: application/vnd.pagerduty+json;version=2")
-                
-                ONCALL_USER_ID=$(echo $ONCALL_DATA | jq -r '.users[0].id // empty')
-                if [ ! -z "$ONCALL_USER_ID" ]; then
-                  cat /tmp/assignments.json | jq --arg id "$ONCALL_USER_ID" '. += [{assignee: {id: $id, type: "user_reference"}}]' > /tmp/assignments_new.json
-                  mv /tmp/assignments_new.json /tmp/assignments.json
-                  echo "✓ Added on-call user ${ONCALL_USER_ID} from schedule"
-                fi
-              fi
-            done
-            
-            echo "🔍 DEBUG - New assignments:"
-            cat /tmp/assignments.json | jq '.'
-            
-            # Update incident with new assignments
-            UPDATE_PAYLOAD=$(cat /tmp/assignments.json | jq '{incident: {type: "incident", assignments: .}}')
-            
-            echo "🔍 DEBUG - Update payload:"
-            echo "$UPDATE_PAYLOAD" | jq '.'
-            
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
-              "https://api.pagerduty.com/incidents/${INCIDENT_ID}" \
-              -H "Authorization: Token token=${PD_API_KEY}" \
-              -H "Content-Type: application/json" \
-              -H "Accept: application/vnd.pagerduty+json;version=2" \
-              -H "From: ${PD_FROM_EMAIL}" \
-              -d "$UPDATE_PAYLOAD")
-            
-            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-            RESPONSE_BODY=$(echo "$RESPONSE" | head -n-1)
-            
-            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-              echo ""
-              echo "✅ SUCCESS: Layer 2 responders added successfully!"
-              echo "HTTP Status: ${HTTP_CODE}"
+              # Get escalation policy details
+              ep_response = requests.get(f"{BASE_URL}/escalation_policies/{ep_id}", headers=HEADERS)
+              ep_data = ep_response.json()['escalation_policy']
               
-              # Count new assignments
-              TOTAL_ASSIGNMENTS=$(cat /tmp/assignments.json | jq 'length')
-              echo "✓ Total responders now: ${TOTAL_ASSIGNMENTS}"
-            else
-              echo ""
-              echo "❌ ERROR: Failed to add responders"
-              echo "HTTP Status: ${HTTP_CODE}"
-              echo "Response: ${RESPONSE_BODY}"
-              exit 1
-            fi
-            
-          else
-            if [ "$INCIDENT_STATUS" = "resolved" ]; then
-              echo ""
-              echo "✓ Incident is already resolved. No action needed."
-            else
-              echo ""
-              echo "✅ Sufficient acknowledgments (${ACK_COUNT}/2). No action needed."
-            fi
-          fi
+              ep_name = ep_data['name']
+              escalation_rules = ep_data['escalation_rules']
+              
+              print(f"✓ Escalation Policy: {ep_name}")
+              print(f"✓ Escalation Policy has {len(escalation_rules)} level(s)")
+              
+              # Check if Layer 2 exists
+              if len(escalation_rules) < 2:
+                  print("⚠️  WARNING: Escalation Policy only has 1 level. No Layer 2 to add.")
+                  sys.exit(0)
+              
+              # Get Layer 2 targets
+              layer_2_targets = escalation_rules[1]['targets']
+              print(f"✓ Layer 2 targets found: {len(layer_2_targets)} target(s)")
+              
+              # Get existing assignments
+              existing_assignments = [
+                  {"assignee": {"id": a['assignee']['id'], "type": a['assignee']['type']}}
+                  for a in incident_data.get('assignments', [])
+              ]
+              
+              print(f"✓ Existing assignments: {len(existing_assignments)}")
+              
+              # Add Layer 2 targets
+              new_assignments = existing_assignments.copy()
+              
+              for target in layer_2_targets:
+                  target_type = target['type']
+                  target_id = target['id']
+                  
+                  if target_type == "user_reference":
+                      print(f"✓ Adding user {target_id}...")
+                      new_assignments.append({
+                          "assignee": {"id": target_id, "type": "user_reference"}
+                      })
+                  elif target_type == "schedule_reference":
+                      print(f"✓ Fetching on-call user from schedule {target_id}...")
+                      oncall_response = requests.get(
+                          f"{BASE_URL}/schedules/{target_id}/users",
+                          headers=HEADERS
+                      )
+                      oncall_data = oncall_response.json()
+                      
+                      if oncall_data.get('users'):
+                          oncall_user_id = oncall_data['users'][0]['id']
+                          new_assignments.append({
+                              "assignee": {"id": oncall_user_id, "type": "user_reference"}
+                          })
+                          print(f"✓ Added on-call user {oncall_user_id} from schedule")
+              
+              print(f"✓ Total assignments: {len(new_assignments)}")
+              
+              # Update incident
+              update_payload = {
+                  "incident": {
+                      "type": "incident",
+                      "assignments": new_assignments
+                  }
+              }
+              
+              print("Updating incident...")
+              update_response = requests.put(
+                  f"{BASE_URL}/incidents/{INCIDENT_ID}",
+                  headers=HEADERS,
+                  json=update_payload
+              )
+              
+              if update_response.status_code in [200, 201]:
+                  print("")
+                  print("✅ SUCCESS: Layer 2 responders added successfully!")
+                  print(f"HTTP Status: {update_response.status_code}")
+                  print(f"✓ Total responders now: {len(new_assignments)}")
+              else:
+                  print("")
+                  print("❌ ERROR: Failed to add responders")
+                  print(f"HTTP Status: {update_response.status_code}")
+                  print(f"Response: {update_response.text}")
+                  sys.exit(1)
           
-          echo ""
-          echo "================================================"
-          echo "Workflow completed successfully"
-          echo "================================================"
+          else:
+              if status == "resolved":
+                  print("")
+                  print("✓ Incident is already resolved. No action needed.")
+              else:
+                  print("")
+                  print(f"✅ Sufficient acknowledgments ({ack_count}/2). No action needed.")
+          
+          print("")
+          print("=" * 50)
+          print("Workflow completed successfully")
+          print("=" * 50)
+          EOF
