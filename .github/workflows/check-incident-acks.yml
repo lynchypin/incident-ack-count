@@ -96,32 +96,58 @@ jobs:
             echo "🔍 DEBUG - Layer 2 targets:"
             echo $LAYER_2_TARGETS | jq '.'
             
-            # Build responder request targets array using jq map
-            RESPONDER_TARGETS=$(echo $LAYER_2_TARGETS | jq -c '[.[] | {responder_request_target: {type: .type, id: .id}}]')
+            # Build assignments array - keep existing + add Layer 2
+            EXISTING_ASSIGNMENTS=$(echo $INCIDENT_DATA | jq -c '.incident.assignments')
             
-            echo "✓ Built responder targets payload"
+            echo "🔍 DEBUG - Existing assignments:"
+            echo $EXISTING_ASSIGNMENTS | jq '.'
             
-            # DEBUG: Print the payload we're sending
-            echo "🔍 DEBUG - Responder targets payload:"
-            echo $RESPONDER_TARGETS | jq '.'
+            # Add Layer 2 users to assignments
+            NEW_ASSIGNMENTS="$EXISTING_ASSIGNMENTS"
+            for target in $(echo $LAYER_2_TARGETS | jq -c '.[]'); do
+              TARGET_TYPE=$(echo $target | jq -r '.type')
+              TARGET_ID=$(echo $target | jq -r '.id')
+              
+              if [ "$TARGET_TYPE" = "user_reference" ]; then
+                # Add user directly
+                echo "✓ Adding user ${TARGET_ID}..."
+                NEW_ASSIGNMENT=$(jq -n --arg id "$TARGET_ID" '{assignee: {id: $id, type: "user_reference"}}')
+                NEW_ASSIGNMENTS=$(echo $NEW_ASSIGNMENTS | jq --argjson new "$NEW_ASSIGNMENT" '. += [$new]')
+              elif [ "$TARGET_TYPE" = "schedule_reference" ]; then
+                # For schedules, we need to get the on-call user
+                echo "✓ Fetching on-call user from schedule ${TARGET_ID}..."
+                ONCALL_DATA=$(curl -s -X GET \
+                  "https://api.pagerduty.com/schedules/${TARGET_ID}/users" \
+                  -H "Authorization: Token token=${PD_API_KEY}" \
+                  -H "Accept: application/vnd.pagerduty+json;version=2")
+                
+                ONCALL_USER_ID=$(echo $ONCALL_DATA | jq -r '.users[0].id // empty')
+                if [ ! -z "$ONCALL_USER_ID" ]; then
+                  NEW_ASSIGNMENT=$(jq -n --arg id "$ONCALL_USER_ID" '{assignee: {id: $id, type: "user_reference"}}')
+                  NEW_ASSIGNMENTS=$(echo $NEW_ASSIGNMENTS | jq --argjson new "$NEW_ASSIGNMENT" '. += [$new]')
+                  echo "✓ Added on-call user ${ONCALL_USER_ID} from schedule"
+                fi
+              fi
+            done
             
-            # Build the request payload
-            REQUEST_PAYLOAD=$(jq -n \
-              --arg msg "Adding Layer 2 responders - insufficient L1 acknowledgments (${ACK_COUNT}/2)" \
-              --argjson targets "$RESPONDER_TARGETS" \
-              '{message: $msg, responder_request_targets: $targets}')
+            echo "🔍 DEBUG - New assignments:"
+            echo $NEW_ASSIGNMENTS | jq '.'
             
-            echo "🔍 DEBUG - Full request payload:"
-            echo $REQUEST_PAYLOAD | jq '.'
+            # Update incident with new assignments
+            UPDATE_PAYLOAD=$(jq -n \
+              --argjson assignments "$NEW_ASSIGNMENTS" \
+              '{incident: {type: "incident", assignments: $assignments}}')
             
-            # Add responders to incident
-            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
-              "https://api.pagerduty.com/incidents/${INCIDENT_ID}/responder_requests" \
+            echo "🔍 DEBUG - Update payload:"
+            echo $UPDATE_PAYLOAD | jq '.'
+            
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X PUT \
+              "https://api.pagerduty.com/incidents/${INCIDENT_ID}" \
               -H "Authorization: Token token=${PD_API_KEY}" \
               -H "Content-Type: application/json" \
               -H "Accept: application/vnd.pagerduty+json;version=2" \
               -H "From: ${PD_FROM_EMAIL}" \
-              -d "$REQUEST_PAYLOAD")
+              -d "$UPDATE_PAYLOAD")
             
             HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
             RESPONSE_BODY=$(echo "$RESPONSE" | head -n-1)
@@ -131,9 +157,9 @@ jobs:
               echo "✅ SUCCESS: Layer 2 responders added successfully!"
               echo "HTTP Status: ${HTTP_CODE}"
               
-              # Count how many responders were added
-              RESPONDERS_ADDED=$(echo $RESPONSE_BODY | jq '.responder_request.responder_request_targets | length')
-              echo "✓ ${RESPONDERS_ADDED} responder(s) added to incident #${INCIDENT_NUMBER}"
+              # Count new assignments
+              TOTAL_ASSIGNMENTS=$(echo $NEW_ASSIGNMENTS | jq 'length')
+              echo "✓ Total responders now: ${TOTAL_ASSIGNMENTS}"
             else
               echo ""
               echo "❌ ERROR: Failed to add responders"
