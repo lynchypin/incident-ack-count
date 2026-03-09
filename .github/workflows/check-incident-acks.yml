@@ -12,6 +12,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
       
+      - name: Wait 3 minutes before checking acknowledgments
+        run: |
+          echo "⏱️  Waiting 3 minutes before checking acknowledgment count..."
+          echo "Started at: $(date)"
+          sleep 180
+          echo "Wait complete at: $(date)"
+      
       - name: Check acknowledgment count and add responders if needed
         env:
           PD_API_KEY: ${{ secrets.PD_API_KEY }}
