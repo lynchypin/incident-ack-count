@@ -92,20 +92,8 @@ jobs:
             LAYER_2_TARGETS=$(echo $EP_DATA | jq -c '.escalation_policy.escalation_rules[1].targets')
             echo "✓ Layer 2 targets found: $(echo $LAYER_2_TARGETS | jq 'length') target(s)"
             
-            # Build responder request targets array
-            RESPONDER_TARGETS="[]"
-            
-            # Add each target from Layer 2
-            for target in $(echo $LAYER_2_TARGETS | jq -c '.[]'); do
-              TARGET_TYPE=$(echo $target | jq -r '.type')
-              TARGET_ID=$(echo $target | jq -r '.id')
-              
-              if [ "$TARGET_TYPE" = "user_reference" ]; then
-                RESPONDER_TARGETS=$(echo $RESPONDER_TARGETS | jq --arg id "$TARGET_ID" '. += [{"responder_request_target": {"type": "user_reference", "id": $id}}]')
-              elif [ "$TARGET_TYPE" = "schedule_reference" ]; then
-                RESPONDER_TARGETS=$(echo $RESPONDER_TARGETS | jq --arg id "$TARGET_ID" '. += [{"responder_request_target": {"type": "schedule_reference", "id": $id}}]')
-              fi
-            done
+            # Build responder request targets array using jq map
+            RESPONDER_TARGETS=$(echo $LAYER_2_TARGETS | jq -c '[.[] | {responder_request_target: {type: .type, id: .id}}]')
             
             echo "✓ Built responder targets payload"
             
