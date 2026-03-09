@@ -16,7 +16,7 @@ jobs:
         run: |
           echo "⏱️  Waiting 3 minutes before checking acknowledgment count..."
           echo "Started at: $(date)"
-          sleep 10
+          sleep 180
           echo "Wait complete at: $(date)"
       
       - name: Check acknowledgment count and add responders if needed
@@ -96,14 +96,11 @@ jobs:
             echo "🔍 DEBUG - Layer 2 targets:"
             echo $LAYER_2_TARGETS | jq '.'
             
-            # Get existing assignees (just the IDs)
-            EXISTING_ASSIGNMENTS=$(echo $INCIDENT_DATA | jq -c '[.incident.assignments[].assignee | {assignee: {id: .id, type: .type}}]')
+            # Get existing assignees (just the IDs) and write to temp file
+            echo $INCIDENT_DATA | jq '[.incident.assignments[].assignee | {assignee: {id: .id, type: .type}}]' > /tmp/assignments.json
             
             echo "🔍 DEBUG - Existing assignments (cleaned):"
-            echo $EXISTING_ASSIGNMENTS | jq '.'
-            
-            # Build NEW_ASSIGNMENTS starting with existing
-            NEW_ASSIGNMENTS="$EXISTING_ASSIGNMENTS"
+            cat /tmp/assignments.json | jq '.'
             
             # Add Layer 2 users to assignments
             for target in $(echo $LAYER_2_TARGETS | jq -c '.[]'); do
@@ -113,7 +110,8 @@ jobs:
               if [ "$TARGET_TYPE" = "user_reference" ]; then
                 # Add user directly
                 echo "✓ Adding user ${TARGET_ID}..."
-                NEW_ASSIGNMENTS=$(echo "$NEW_ASSIGNMENTS" | jq --arg id "$TARGET_ID" '. += [{assignee: {id: $id, type: "user_reference"}}]')
+                cat /tmp/assignments.json | jq --arg id "$TARGET_ID" '. += [{assignee: {id: $id, type: "user_reference"}}]' > /tmp/assignments_new.json
+                mv /tmp/assignments_new.json /tmp/assignments.json
               elif [ "$TARGET_TYPE" = "schedule_reference" ]; then
                 # For schedules, we need to get the on-call user
                 echo "✓ Fetching on-call user from schedule ${TARGET_ID}..."
@@ -124,17 +122,18 @@ jobs:
                 
                 ONCALL_USER_ID=$(echo $ONCALL_DATA | jq -r '.users[0].id // empty')
                 if [ ! -z "$ONCALL_USER_ID" ]; then
-                  NEW_ASSIGNMENTS=$(echo "$NEW_ASSIGNMENTS" | jq --arg id "$ONCALL_USER_ID" '. += [{assignee: {id: $id, type: "user_reference"}}]')
+                  cat /tmp/assignments.json | jq --arg id "$ONCALL_USER_ID" '. += [{assignee: {id: $id, type: "user_reference"}}]' > /tmp/assignments_new.json
+                  mv /tmp/assignments_new.json /tmp/assignments.json
                   echo "✓ Added on-call user ${ONCALL_USER_ID} from schedule"
                 fi
               fi
             done
             
             echo "🔍 DEBUG - New assignments:"
-            echo "$NEW_ASSIGNMENTS" | jq '.'
+            cat /tmp/assignments.json | jq '.'
             
             # Update incident with new assignments
-            UPDATE_PAYLOAD=$(echo "$NEW_ASSIGNMENTS" | jq '{incident: {type: "incident", assignments: .}}')
+            UPDATE_PAYLOAD=$(cat /tmp/assignments.json | jq '{incident: {type: "incident", assignments: .}}')
             
             echo "🔍 DEBUG - Update payload:"
             echo "$UPDATE_PAYLOAD" | jq '.'
@@ -156,7 +155,7 @@ jobs:
               echo "HTTP Status: ${HTTP_CODE}"
               
               # Count new assignments
-              TOTAL_ASSIGNMENTS=$(echo "$NEW_ASSIGNMENTS" | jq 'length')
+              TOTAL_ASSIGNMENTS=$(cat /tmp/assignments.json | jq 'length')
               echo "✓ Total responders now: ${TOTAL_ASSIGNMENTS}"
             else
               echo ""
