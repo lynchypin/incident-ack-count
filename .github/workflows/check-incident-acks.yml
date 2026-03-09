@@ -16,7 +16,7 @@ jobs:
         run: |
           echo "⏱️  Waiting 3 minutes before checking acknowledgment count..."
           echo "Started at: $(date)"
-          sleep 180
+          sleep 10
           echo "Wait complete at: $(date)"
       
       - name: Check acknowledgment count and add responders if needed
