@@ -317,9 +317,8 @@ If Layer 2 contains multiple schedules, the script:
 ## 🤝 Support
 
 If you encounter issues:
-1. Check the [Troubleshooting](#troubleshooting) section
-2. Review the GitHub Actions logs for detailed error messages
-3. Verify all secrets are correctly configured
+1. Review the GitHub Actions logs for detailed error messages
+2. Verify all secrets are correctly configured
 
 ---
 
@@ -328,5 +327,3 @@ If you encounter issues:
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ---
-
-**Built with ⚡ by the PagerDuty community**
